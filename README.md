@@ -5,7 +5,7 @@ DriveDreamer-Policy: A Geometry-Grounded World–Action Model for Unified Genera
 
 ## Updates <a name="updates"></a>
 
-- [04/2026] We release the paper draft on  arXiv and code is coming soon!
+- [04/2026] We release the paper draft on [arXiv](https://arxiv.org/abs/2604.01765) and code is coming soon!
 
 ## License <a name="license"></a>
 

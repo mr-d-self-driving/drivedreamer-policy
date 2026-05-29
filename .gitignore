@@ -1,0 +1,36 @@
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Environments ──────────────────────────────────────────────────────────────
+.env
+env.local.sh
+*.local.sh
+
+# ── Experiment outputs (large; not tracked in git) ───────────────────────────
+navsim_exp/
+navsim_planning_results/
+ckpts/
+
+# ── Datasets (too large for git) ─────────────────────────────────────────────
+navsim_dataset/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── WandB ─────────────────────────────────────────────────────────────────────
+wandb/
+
+.claude

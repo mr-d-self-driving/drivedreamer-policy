@@ -1,0 +1,390 @@
+"""
+DriveDreamer-Policy: NavSim VLA Inference Script
+
+Loads a trained checkpoint, runs batch inference over a NavSim split,
+and writes per-token trajectory predictions as .npy files.
+"""
+
+import os
+import re
+import json
+import argparse
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from starVLA.dataloader.navsim_dataset import NavSimDataset, collate_fn
+from starVLA.model.framework.QwenOFT import Qwenvl_OFT
+from starVLA.model.framework.QwenOFT_s2 import Qwenvl_OFT_s2
+import copy
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def to_device(batch: Any, device: torch.device) -> Any:
+    """Recursively move tensors to *device*."""
+    if torch.is_tensor(batch):
+        return batch.to(device, non_blocking=True)
+    if isinstance(batch, dict):
+        return {k: to_device(v, device) for k, v in batch.items()}
+    if isinstance(batch, (list, tuple)):
+        return type(batch)(to_device(v, device) for v in batch)
+    return batch
+
+
+def tensor_to_py(x: Any) -> Any:
+    """Recursively convert tensors to Python lists."""
+    if torch.is_tensor(x):
+        return x.detach().float().cpu().tolist()
+    if isinstance(x, dict):
+        return {k: tensor_to_py(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [tensor_to_py(v) for v in x]
+    return x
+
+
+def wrap_to_pi(a: np.ndarray) -> np.ndarray:
+    """Wrap angle(s) to the range (-π, π]."""
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+# ---------------------------------------------------------------------------
+# Action post-processing helpers
+# ---------------------------------------------------------------------------
+
+# Normalization statistics (computed from navtrain split)
+_X_MEAN, _X_STD = 10.172484, 8.805105
+_Y_MEAN, _Y_STD = 0.360762, 2.277741
+
+# Per-channel 1st / 99th percentiles used for [-1, 1] normalization (ver_1226)
+_Q01 = np.array([-0.01789146974507183, -0.19088272509455573, -0.1892357842470911], dtype=np.float64)
+_Q99 = np.array([6.199554522088146,    0.24262804072441968,  0.1804889553518122],  dtype=np.float64)
+
+
+def deal_action(action: np.ndarray) -> np.ndarray:
+    """
+    Convert raw delta predictions (legacy ver ≤ 1224) to (x, y, heading) poses.
+
+    action: (B, H, 2)  — cumulative deltas in internal (-y, x) convention
+    returns: (B, H, 3) — [x, y, heading_rad] in ego-centric frame
+    """
+    action = np.cumsum(action, axis=1)
+    action[..., -1] *= 4.5912
+
+    # Reorder axes: internal (-y, x) → world (x, y)
+    a = action.copy()
+    a[..., 0] = action[..., 1]   # x
+    a[..., 1] = -action[..., 0]  # y
+    xy = a
+
+    B, H, _ = xy.shape
+    heading = np.empty((B, H))
+    heading[:, 0] = np.arctan2(xy[:, 0, 1], xy[:, 0, 0])
+    d = xy[:, 1:, :] - xy[:, :-1, :]
+    heading[:, 1:] = np.arctan2(d[..., 1], d[..., 0])
+
+    # Re-anchor so index 0 uses the first displacement
+    zeros = np.zeros((B, 1, 2), dtype=xy.dtype)
+    final_xy = np.concatenate([zeros, xy], axis=1)[:, 1:]
+    return np.concatenate([final_xy, heading[..., None]], axis=-1)
+
+
+def smooth_pose_pred(pred: np.ndarray, alpha_xy: float = 0.4, alpha_heading: float = 0.4,
+                     renorm: bool = True) -> np.ndarray:
+    """
+    Exponential-moving-average smoothing over the time axis.
+
+    pred:    (B, H, 4) = [x, y, sin(heading), cos(heading)]
+    returns: (B, H, 4) smoothed, sin/cos pair re-normalised if *renorm* is True
+    """
+    pred = np.asarray(pred, dtype=np.float64)
+    out = pred.copy()
+    for t in range(1, out.shape[1]):
+        out[:, t, 0] = alpha_xy      * out[:, t, 0] + (1 - alpha_xy)      * out[:, t - 1, 0]
+        out[:, t, 1] = alpha_xy      * out[:, t, 1] + (1 - alpha_xy)      * out[:, t - 1, 1]
+        out[:, t, 2] = alpha_heading * out[:, t, 2] + (1 - alpha_heading) * out[:, t - 1, 2]
+        out[:, t, 3] = alpha_heading * out[:, t, 3] + (1 - alpha_heading) * out[:, t - 1, 3]
+        if renorm:
+            r = np.sqrt(out[:, t, 2] ** 2 + out[:, t, 3] ** 2) + 1e-12
+            out[:, t, 2] /= r
+            out[:, t, 3] /= r
+    return out
+
+
+def deal_action_1225(pred: np.ndarray, scale_x: float = 4.5912, act_norm: int = 0,
+                     scale_y: Optional[float] = None) -> np.ndarray:
+    """
+    Convert predictions from ver_1225 format to (x, y, heading) poses.
+
+    pred:    (B, H, 4) = [dx, dy, sin(dθ), cos(dθ)]
+    returns: (B, H, 3) = [x, y, θ]
+    """
+    pred = np.asarray(pred)
+    dxdy = pred[..., :2].copy()
+
+    if act_norm == 0:
+        dxdy[..., 0] *= scale_x
+    else:
+        dxdy[..., 0] = dxdy[..., 0] * _X_STD + _X_MEAN
+        dxdy[..., 1] = dxdy[..., 1] * _Y_STD + _Y_MEAN
+
+    if scale_y is not None:
+        dxdy[..., 1] *= scale_y
+
+    theta = wrap_to_pi(np.arctan2(pred[..., 2], pred[..., 3]))
+    return np.concatenate([dxdy, theta[..., None]], axis=-1)
+
+
+def _denorm_action_batch(normed: np.ndarray, q01: np.ndarray, q99: np.ndarray) -> np.ndarray:
+    """De-normalise from [-1, 1] back to physical units."""
+    normed = np.asarray(normed, dtype=np.float64)
+    q01 = np.asarray(q01, dtype=np.float64)[None, None, :]
+    q99 = np.asarray(q99, dtype=np.float64)[None, None, :]
+    return (normed + 1.0) * 0.5 * (q99 - q01) + q01
+
+
+def deal_action_1226(action_norm: np.ndarray, origin: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Convert normalised delta predictions (ver_1226) to absolute poses.
+
+    action_norm: (B, H, 3) in [-1, 1]
+    origin:      None or (B, 3) = [x0, y0, θ0]
+    returns:     (B, H, 3) = [x, y, θ] relative to origin
+    """
+    deltas = _denorm_action_batch(action_norm, _Q01, _Q99)
+    deltas[..., 2] = wrap_to_pi(deltas[..., 2])
+    deltas = np.asarray(deltas, dtype=np.float64)
+    B, H, _ = deltas.shape
+
+    if origin is None:
+        x = np.zeros(B, dtype=np.float64)
+        y = np.zeros(B, dtype=np.float64)
+        th = np.zeros(B, dtype=np.float64)
+    else:
+        origin = np.asarray(origin, dtype=np.float64)
+        if origin.ndim == 1:
+            origin = np.broadcast_to(origin[None, :], (B, 3))
+        x, y, th = origin[:, 0].copy(), origin[:, 1].copy(), origin[:, 2].copy()
+
+    poses = np.zeros((B, H, 3), dtype=np.float64)
+    for t in range(H):
+        dx_b, dy_b, dth = deltas[:, t, 0], deltas[:, t, 1], deltas[:, t, 2]
+        c, s = np.cos(th), np.sin(th)
+        x  += c * dx_b - s * dy_b
+        y  += s * dx_b + c * dy_b
+        th  = wrap_to_pi(th + dth)
+        poses[:, t, 0] = x
+        poses[:, t, 1] = y
+        poses[:, t, 2] = th
+
+    return poses
+
+
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
+
+class VLAAgent:
+    """Wraps a trained VLA checkpoint for inference."""
+
+    def __init__(self, ckpt_dir: str, model_iter: Optional[int] = None, device: str = "cuda"):
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+
+        # ── Resolve config path ────────────────────────────────────────────
+        if ckpt_dir.endswith(".pt"):
+            cfg_path = os.path.join(str(Path(ckpt_dir).parent.parent), "config.yaml")
+            if not os.path.exists(cfg_path):
+                # checkpoint stored one level deeper (e.g. RL fine-tuned)
+                cfg_path = os.path.join(str(Path(ckpt_dir).parent.parent.parent), "config.yaml")
+        else:
+            cfg_path = os.path.join(ckpt_dir, "config.yaml")
+
+        if not os.path.exists(cfg_path):
+            raise FileNotFoundError(f"config.yaml not found: {cfg_path}")
+        self.model_config = OmegaConf.load(cfg_path)
+
+        # Override base_vlm with the local path set in env.sh (BASE_VLM).
+        # The saved config.yaml may contain a hardcoded path from the training machine.
+        if os.environ.get("BASE_VLM"):
+            OmegaConf.update(self.model_config, "framework.qwenvl.base_vlm",
+                             os.environ["BASE_VLM"], force_add=True)
+
+        # Disable optional data loading heads during inference
+        OmegaConf.update(self.model_config, "datasets.reward_data", {"load_reward_data": False}, force_add=True)
+        OmegaConf.update(self.model_config, "datasets.vla_data",    {"w_neg_traj": None},         force_add=True)
+
+        # ── Resolve weight path ────────────────────────────────────────────
+        if ckpt_dir.endswith(".pt"):
+            self.model_path = ckpt_dir
+        else:
+            final_path = os.path.join(ckpt_dir, "final_model", "pytorch_model.pt")
+            flat_path   = os.path.join(ckpt_dir, "pytorch_model.pt")
+            if os.path.exists(final_path):
+                self.model_path = final_path
+            elif os.path.exists(flat_path):
+                # HuggingFace flat layout: config.yaml + pytorch_model.pt in the same dir
+                self.model_path = flat_path
+            else:
+                ckpt_subdir = os.path.join(ckpt_dir, "checkpoints")
+                if not os.path.isdir(ckpt_subdir):
+                    raise FileNotFoundError(f"Neither final_model/pytorch_model.pt, pytorch_model.pt, nor checkpoints/ found under: {ckpt_dir}")
+                pat = re.compile(r"steps_(\d+)_pytorch_model\.pt")
+                step_files = [f for f in os.listdir(ckpt_subdir) if pat.search(f)]
+                if not step_files:
+                    raise FileNotFoundError(f"No steps_*_pytorch_model.pt found in {ckpt_subdir}")
+                if model_iter is None:
+                    chosen = sorted(step_files, key=lambda s: int(pat.search(s).group(1)))[-1]
+                else:
+                    chosen = next(
+                        (f for f in step_files if int(pat.search(f).group(1)) == int(model_iter)), None
+                    )
+                    if chosen is None:
+                        raise FileNotFoundError(f"steps_{model_iter}_pytorch_model.pt not found in {ckpt_subdir}")
+                self.model_path = os.path.join(ckpt_subdir, chosen)
+
+        print(f"[Agent] config:  {cfg_path}")
+        print(f"[Agent] weights: {self.model_path}")
+
+        # ── Build model ────────────────────────────────────────────────────
+        if "s2" in self.model_path:
+            print("[Agent] Loading s2 model")
+            self.model = Qwenvl_OFT_s2(self.model_config)
+        else:
+            self.model = Qwenvl_OFT(self.model_config, infer_not_load_wan=1)
+
+        state = torch.load(self.model_path, map_location="cpu", weights_only=True)
+        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        print("[Agent] missing keys:",    missing)
+        print("[Agent] unexpected keys:", unexpected)
+
+        self.model.to(self.device).eval()
+
+    @torch.no_grad()
+    def predict(self, batch: Any) -> Dict[str, Any]:
+        return self.model.predict_action_infer_1d(batch)
+
+
+# ---------------------------------------------------------------------------
+# Inference loop
+# ---------------------------------------------------------------------------
+
+def infer_and_save(
+    ckpt_dir: str,
+    datalist_path: str,
+    out_dir: str,
+    split: str = "test",
+    batch_size: int = 8,
+    num_workers: int = 7,
+    device: str = "cuda",
+    model_iter: Optional[int] = None,
+    overwrite: bool = True,
+    args=None,
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    agent = VLAAgent(ckpt_dir, model_iter=model_iter, device=device)
+    cfg = agent.model_config
+
+    ver_1225 = OmegaConf.select(cfg, "ver_1225", default=False)
+    act_norm  = OmegaConf.select(cfg.datasets.vla_data, "act_norm", default=0)
+
+    # Override config to skip unused data heads at inference time
+    data_cfg = copy.deepcopy(cfg)
+    data_cfg.datasets.video_data.load_2d_data = 0
+    data_cfg.datasets.video_data.load_3d_data = 0
+    data_cfg.datasets.vla_data.act_norm = act_norm
+    data_cfg.w_depth = 0
+    data_cfg.enable_image_aug = 0
+
+    dataset = NavSimDataset(
+        datalist_path=datalist_path,
+        split=split,
+        video_data_cfg=data_cfg.datasets.video_data,
+        gs_data_cfg=data_cfg.datasets.gs_data,
+        reward_data_cfg=data_cfg.datasets.reward_data,
+        ver_1225=ver_1225,
+        dataset_cfg=data_cfg.datasets.vla_data,
+        all_cfg=data_cfg,
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        shuffle=False,
+        pin_memory=False,
+        drop_last=False,
+    )
+
+    all_preds: Dict[str, np.ndarray] = {}
+
+    for batch in tqdm(loader, desc="Infer"):
+        batch_on_device = to_device(batch, agent.device)
+        pred = agent.predict(batch_on_device)
+
+        action = pred["normalized_actions"]
+
+        if ver_1225 == 1:
+            if args.smooth:
+                action = smooth_pose_pred(action, alpha_xy=1.0, alpha_heading=0.4)
+            final_xy = deal_action_1225(action, act_norm=act_norm)
+        elif ver_1225 == 2:
+            final_xy = deal_action_1226(action)
+        else:
+            final_xy = deal_action(action)
+
+        tokens = [b["token"] for b in batch]
+        for i, tok in enumerate(tokens):
+            all_preds[tok] = final_xy[i]
+
+    for k, v in tqdm(all_preds.items(), desc="Store"):
+        np.save(os.path.join(out_dir, k + ".npy"), v)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    p = argparse.ArgumentParser("NavSim VLA inference")
+    p.add_argument("--ckpt_dir",      type=str, required=True)
+    p.add_argument("--datalist_path", type=str, required=True)
+    p.add_argument("--out_dir",       type=str, required=True)
+    p.add_argument("--split",         type=str, default="test")
+    p.add_argument("--batch_size",    type=int, default=8)
+    p.add_argument("--num_workers",   type=int, default=7)
+    p.add_argument("--device",        type=str, default="cuda")
+    p.add_argument("--model_iter",    type=int, default=None)
+    p.add_argument("--overwrite",     action="store_true")
+    p.add_argument("--smooth",        type=int, default=0)
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    smooth_suffix = "-smooth" if args.smooth != 0 else ""
+    args.out_dir = os.path.join(
+        args.out_dir,
+        Path(args.ckpt_dir).name + smooth_suffix,
+        args.split,
+    )
+    infer_and_save(
+        ckpt_dir=args.ckpt_dir,
+        datalist_path=args.datalist_path,
+        out_dir=args.out_dir,
+        split=args.split,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        device=args.device,
+        model_iter=args.model_iter,
+        overwrite=args.overwrite,
+        args=args,
+    )

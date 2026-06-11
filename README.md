@@ -19,9 +19,9 @@
 1. [Setup](#1-setup)
 2. [Data Preparation](#2-data-preparation)
 3. [Model Weights](#3-model-weights)
-4. [Inference](#4-inference)
-5. [Evaluation](#5-evaluation)
-6. [Add World & Action Tokens](#6-add-world--action-tokens)
+4. [Add World & Action Tokens](#4-add-world--action-tokens)
+5. [Inference](#5-inference)
+6. [Evaluation](#6-evaluation)
 7. [Training](#7-training)
 8. [Project Structure](#8-project-structure)
 9. [Citation](#9-citation)
@@ -213,7 +213,26 @@ depth_model_ckpts/
 
 ---
 
-## 4. Inference
+## 4. Add World & Action Tokens
+
+The base `Qwen3-VL-2B-Instruct` vocabulary must be extended with special tokens for world generation and action prediction (e.g. `<2d_world_*>`, `<robot_action_*>`). Run **once** before inference or training:
+
+```bash
+source env.sh
+bash 7-add_token.sh
+```
+
+After it finishes, update `BASE_VLM` in `env.sh` to point to the new extended model:
+
+```bash
+export BASE_VLM=/path/to/Qwen3-VL-2B-WorldAction   # TARGET_VLM from 7-add_token.sh
+```
+
+Also set `VIDEO_MODEL` in `8-train.sh` / `debug.sh` to your local Wan2.1 model root directory.
+
+---
+
+## 5. Inference
 
 Set `MODEL_DIR` at the top of `4-infer.sh` to your checkpoint directory, then run:
 
@@ -238,7 +257,7 @@ python infer.py \
 
 ---
 
-## 5. Evaluation
+## 6. Evaluation
 
 Evaluation requires a pre-computed metric cache. If you do not have one, run the caching script first (commented out at the top of each eval script).
 
@@ -263,25 +282,6 @@ Uses the PDM-Score evaluator from the NAVSIM v1.1 devkit (`navsim_v1.1/navsim/`)
 
 ---
 
-## 6. Add World & Action Tokens
-
-Before training, the base `Qwen3-VL-2B-Instruct` vocabulary must be extended with special tokens for world generation and action prediction (e.g. `<2d_world_*>`, `<robot_action_*>`). Run **once** before any training:
-
-```bash
-source env.sh
-bash 7-add_token.sh
-```
-
-After it finishes, update `BASE_VLM` in `env.sh` to point to the new extended model:
-
-```bash
-export BASE_VLM=/path/to/Qwen3-VL-2B-WorldAction   # TARGET_VLM from 7-add_token.sh
-```
-
-Also set `VIDEO_MODEL` in `8-train.sh` / `debug.sh` to your local Wan2.1 model root directory.
-
----
-
 ## 7. Training
 
 ### Full training (8×GPU, navtrain split)
@@ -291,7 +291,7 @@ source env.sh
 bash 8-train.sh
 ```
 
-Launches DeepSpeed ZeRO-2 training across 8 GPUs with all three heads active (1D action + 2D video + 3D depth). Set `VIDEO_MODEL`, `VIDEO_CONFIG`, and `VIDEO_DATA_DIR` at the top of `8-train.sh`. The run ID is auto-timestamped; checkpoints are saved to `$NAVSIM_EXP_ROOT/<run_id>/`.
+Launches DeepSpeed ZeRO-2 training across 8 GPUs with all three heads active (1D action + 2D video + 3D depth). Set `VIDEO_MODEL`, `VIDEO_CONFIG`, `VIDEO_DATA_DIR`, and `BASE_VLM` (extended model from [Section 4](#4-add-world--action-tokens)) at the top of `8-train.sh`. The run ID is auto-timestamped; checkpoints are saved to `$NAVSIM_EXP_ROOT/<run_id>/`.
 
 ### Debug / sanity check (1×GPU, mini split)
 

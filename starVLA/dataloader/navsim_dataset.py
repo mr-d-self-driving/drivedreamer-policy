@@ -186,6 +186,7 @@ class NavSimDataset(Dataset):
         all_cfg = None,
         max_samples: Optional[int] = None,
         s2_pred_dir: Optional[str] = None,
+        data_root: Optional[str] = None,
     ) -> None:
         with open(datalist_path, "rb") as f:
             raw_list = json.load(f)
@@ -195,7 +196,7 @@ class NavSimDataset(Dataset):
 
         self.raw_list = raw_list
         self.split = split
-        _data_root = os.environ.get("OPENSCENE_DATA_ROOT", "")
+        _data_root = data_root or os.environ.get("OPENSCENE_DATA_ROOT", "")
         if self.split == "mini":
             self.base_dir = os.path.join(_data_root, "meta/mini")
         elif self.split == "mini_test" or self.split == "test":

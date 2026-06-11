@@ -312,6 +312,7 @@ def infer_and_save(
         ver_1225=ver_1225,
         dataset_cfg=data_cfg.datasets.vla_data,
         all_cfg=data_cfg,
+        data_root=getattr(args, "data_root", None),
     )
 
     loader = DataLoader(
@@ -365,6 +366,8 @@ def parse_args():
     p.add_argument("--model_iter",    type=int, default=None)
     p.add_argument("--overwrite",     action="store_true")
     p.add_argument("--smooth",        type=int, default=0)
+    p.add_argument("--data_root",     type=str, default=None,
+                   help="Root of processed navsim_dataset/. Overrides OPENSCENE_DATA_ROOT.")
     return p.parse_args()
 
 

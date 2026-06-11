@@ -19,6 +19,7 @@ pwd
 CUDA_VISIBLE_DEVICES=0 python infer.py \
   --ckpt_dir "${MODEL_DIR}" \
   --datalist_path "${SPLIT}_meta.json" \
+  --data_root "${DATA_ROOT}" \
   --out_dir navsim_planning_results/ \
   --split "${SPLIT}" \
   --batch_size 8 \

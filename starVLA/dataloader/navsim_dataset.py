@@ -196,7 +196,8 @@ class NavSimDataset(Dataset):
 
         self.raw_list = raw_list
         self.split = split
-        _data_root = data_root or os.environ.get("OPENSCENE_DATA_ROOT", "")
+        _cfg_data_root = getattr(dataset_cfg, "data_root", None) if dataset_cfg is not None else None
+        _data_root = data_root or _cfg_data_root or os.environ.get("OPENSCENE_DATA_ROOT", "")
         if self.split == "mini":
             self.base_dir = os.path.join(_data_root, "meta/mini")
         elif self.split == "mini_test" or self.split == "test":

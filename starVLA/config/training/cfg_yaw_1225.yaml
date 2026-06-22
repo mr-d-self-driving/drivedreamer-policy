@@ -162,7 +162,7 @@ datasets:
     load_act_data: 1
     
     dataset_py: navsim_dataset
-    # data_root_dir: playground/Datasets/OXE_LEROBOT_DATASET
+    data_root: navsim_dataset   # root of processed meta pkls; overrides OPENSCENE_DATA_ROOT
     datalist_path: /path/to/mini_meta.json
     split: mini
     # data_mix: bridge_rt_1 # bridge_rt_1

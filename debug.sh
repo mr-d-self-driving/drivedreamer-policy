@@ -48,6 +48,7 @@ CUDA_VISIBLE_DEVICES=${GPU} accelerate launch \
   --wandb_project ${WANDB_PROJECT} \
   --wandb_entity ${WANDB_ENTITY} \
   --datasets.vla_data.datalist_path ${datalist} \
+  --datasets.vla_data.data_root ${DATA_ROOT} \
   --datasets.vla_data.split ${split} \
   --datasets.vla_data.per_device_batch_size ${bz} \
   --framework.action_model.repeated_diffusion_steps ${fm_repeat} \

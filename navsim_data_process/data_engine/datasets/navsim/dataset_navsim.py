@@ -616,6 +616,7 @@ class VLMNavsim(torch.utils.data.Dataset):
 
             if load_lidar == 1 and frame_idx <12 and frame_idx == 3:
                 if synthetic:
+                    pass
                     
                 lidar_path = scene_dict_list[frame_idx]["lidar_path"]
                 lidar = Lidar.from_paths(sensor_blobs_path, lidar_path, ['lidar_pc']).lidar_pc
@@ -723,6 +724,7 @@ class VLMNavsim(torch.utils.data.Dataset):
 
             if load_lidar == 1 and frame_idx <12 and frame_idx == 3:
                 if synthetic:
+                    pass
                     
                 lidar_path = scene_dict_list[frame_idx]["lidar_path"]
                 lidar = Lidar.from_paths(sensor_blobs_path, lidar_path, ['lidar_pc']).lidar_pc
@@ -865,6 +867,7 @@ class VLMNavsim(torch.utils.data.Dataset):
 
             if load_lidar == 1 and frame_idx <12 and frame_idx == 3:
                 if synthetic:
+                    pass
                     
                 lidar_path = scene_dict_list[frame_idx]["lidar_path"]
                 lidar = Lidar.from_paths(sensor_blobs_path, lidar_path, ['lidar_pc']).lidar_pc

@@ -15,7 +15,7 @@ METRIC_CACHE_PATH=/path/to/metric_cache_${SPLIT}    # pre-computed via run_metri
 export NUPLAN_MAP_VERSION="nuplan-maps-v1.0"
 export NAVSIM_EXP_ROOT="$(pwd)/navsim_exp/eval_v1.1"
 export NAVSIM_DEVKIT_ROOT="$(pwd)/navsim_v1.1/navsim"
-export PYTHONPATH="$NAVSIM_DEVKIT_ROOT:$PYTHONPATH"
+export PYTHONPATH="$NAVSIM_DEVKIT_ROOT:${PYTHONPATH:-}"
 export SPLIT PRED_DIR METRIC_CACHE_PATH
 
 # if not cached navsim data, run the following first

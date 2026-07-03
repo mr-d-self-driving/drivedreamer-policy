@@ -1168,6 +1168,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                     input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
                 )
             except:
+                pass
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
         if pixel_values_videos is not None:
